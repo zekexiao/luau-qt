@@ -8,6 +8,8 @@
 #include <QDebug>
 #include <QVector3D>
 
+#include "qllibs.h"
+
 class QLuauPrivate
 {
 public:
@@ -29,7 +31,7 @@ public:
                 output += lua_toboolean(L, i) ? "true" : "false";
             } else if (lua_isvector(L, i)) {
                 auto v = lua_tovector(L, i);
-                output += QString("(%1, %2, %3)").arg(v[0]).arg(v[1]).arg(v[2]);
+                output += QString("{%1, %2, %3}").arg(v[0]).arg(v[1]).arg(v[2]);
             } else if (lua_isnil(L, i)) {
                 output += "nil";
             } else {
@@ -45,6 +47,9 @@ public:
     {
         switch (value.typeId()) {
         case QMetaType::Int:
+        case QMetaType::UInt:
+        case QMetaType::LongLong:
+        case QMetaType::ULongLong:
         case QMetaType::Double:
         case QMetaType::Float: {
             lua_pushnumber(L, value.toDouble());
@@ -70,8 +75,24 @@ public:
             }
             break;
         }
+        case QMetaType::QPointF: {
+            auto point = value.toPointF();
+            auto udata = (QPointF **) lua_newuserdata(L, sizeof(QPointF *));
+            *udata = new QPointF(point);
+            luaL_getmetatable(L, QLPOINT_METATABLE_NAME);
+            lua_setmetatable(L, -2);
+            break;
+        }
+        case QMetaType::QPoint: {
+            auto point = value.toPoint();
+            auto udata = (QPointF **) lua_newuserdata(L, sizeof(QPointF *));
+            *udata = new QPointF(point);
+            luaL_getmetatable(L, QLPOINT_METATABLE_NAME);
+            lua_setmetatable(L, -2);
+            break;
+        }
         default: {
-            qWarning() << "unkonwn qt type" << value.typeName();
+            qWarning() << "unknown qt type" << value.typeName();
         } break;
         }
     }
@@ -167,7 +188,6 @@ public:
                         qWarning() << "unkonwn lua table key" << type;
                         key = QString("<%s: %p>")
                                   .arg(QString::fromUtf8(type), *(ptrdiff_t *) lua_topointer(L, -1));
-
                     } break;
                     }
 
@@ -184,12 +204,20 @@ public:
                 result = dict;
             }
         } break;
+        case LUA_TUSERDATA: {
+            QPointF **udata = (QPointF **) luaL_checkudata(L, index, QLPOINT_METATABLE_NAME);
+            if (udata != nullptr) {
+                result = QVariant::fromValue(**udata);
+                break;
+            }
+        }
         default: {
-            qWarning() << "unkonwn lua type" << lua_typename(L, type);
+            qWarning() << "unknown lua type" << lua_typename(L, type);
         } break;
         }
         return result;
     }
+
     lua_State *L;
 };
 
@@ -200,6 +228,7 @@ QLuau::QLuau(QObject *parent)
     Q_D(QLuau);
     d->L = luaL_newstate();
     luaL_openlibs(d->L);
+    qlpoint_openlib(d->L);
     lua_pushcfunction(d->L, QLuauPrivate::luaPrint, "print");
     lua_setglobal(d->L, "print");
 }
@@ -242,7 +271,7 @@ void QLuau::load(const QString &code)
     }
 }
 
-QVariantList QLuau::call(const QString &funcName, const QVariantList &args)
+QVariant QLuau::call(const QString &funcName, const QVariantList &args)
 {
     Q_D(QLuau);
 
@@ -276,12 +305,17 @@ QVariantList QLuau::call(const QString &funcName, const QVariantList &args)
 
     // 处理返回值
     int numResults = lua_gettop(d->L);
-    if (numResults > 0) {
+    if (numResults == 1) {
+        auto result = d->toValue(-1);
+        lua_pop(d->L, numResults);
+        return result;
+    }
+
+    if (numResults > 1) {
         QVariantList results;
         for (int i = 1; i <= numResults; i++) {
             results.append(d->toValue(-numResults + i - 1));
         }
-
         // 弹出所有返回值
         lua_pop(d->L, numResults);
         return results;
