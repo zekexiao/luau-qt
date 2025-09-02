@@ -1,6 +1,6 @@
 #include "test.h"
 
-#include "qluau.h"
+#include "qlua.h"
 #include <QDebug>
 #include <QTest>
 #include <QVector3D>
@@ -12,7 +12,7 @@ void Test::testBool()
             return true
         end
     )");
-    QLuau qluau;
+    QLua qluau;
     qluau.load(testCode);
     QVariant result = qluau.call("test_bool", {});
     QVERIFY(result.isValid());
@@ -26,7 +26,7 @@ void Test::testInt()
             return 42
         end
     )");
-    QLuau qluau;
+    QLua qluau;
     qluau.load(testCode);
     QVariant result = qluau.call("test_int", {});
     QVERIFY(result.isValid());
@@ -40,7 +40,7 @@ void Test::testDouble()
             return 3.14
         end
     )");
-    QLuau qluau;
+    QLua qluau;
     qluau.load(testCode);
     QVariant result = qluau.call("test_double", {});
     QVERIFY(result.isValid());
@@ -54,7 +54,7 @@ void Test::testString()
             return "hello from lua"
         end
     )");
-    QLuau qluau;
+    QLua qluau;
     qluau.load(testCode);
     QVariant result = qluau.call("test_string", {});
     QVERIFY(result.isValid());
@@ -68,7 +68,7 @@ void Test::testList()
             return {1, 2, 3, 4, 5}
         end
     )");
-    QLuau qluau;
+    QLua qluau;
     qluau.load(testCode);
     QVariant result = qluau.call("test_list", {});
     QVERIFY(result.isValid());
@@ -88,11 +88,11 @@ void Test::testMap()
             return {first=1, second=2, third=3}
         end
     )");
-    QLuau qluau;
+    QLua qluau;
     qluau.load(testCode);
     QVariant result = qluau.call("test_map", {});
     QVERIFY(result.isValid());
-    QMap<QString, QVariant> map = result.toMap();
+    auto map = result.value<QVariantMap>();
     QCOMPARE(map.size(), 3);
     QCOMPARE(map.value("first").toInt(), 1);
     QCOMPARE(map.value("second").toInt(), 2);
@@ -107,12 +107,12 @@ void Test::testVector()
             return v
         end
     )");
-    QLuau qluau;
+    QLua qluau;
     qluau.load(testCode);
     QVector3D vector(1, 2, 3);
     QVariant result = qluau.call("test_qvector3d", {vector});
     QVERIFY(result.isValid());
-    QVector3D v = result.value<QVector3D>();
+    auto v = result.value<QVector3D>();
     QCOMPARE(v.x(), 2.0);
     QCOMPARE(v.y(), 4.0);
     QCOMPARE(v.z(), 6.0);
@@ -126,7 +126,7 @@ void Test::testPoint()
             return p
         end
     )");
-    QLuau qluau;
+    QLua qluau;
     qluau.load(testCode);
     QPointF point(1, 2);
     QVariant result = qluau.call("test_qpoint", {point});

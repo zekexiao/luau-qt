@@ -1,16 +1,13 @@
-#include "qluau.h"
+#include "qlua.h"
 
-#include <Luau/Compiler.h>
-#include <lua.h>
-#include <luacode.h>
-#include <lualib.h>
+#include <lua.hpp>
 
 #include <QDebug>
 #include <QVector3D>
 
 #include "qllibs.h"
 
-class QLuauPrivate
+class QLuaPrivate
 {
 public:
     static int luaPrint(lua_State *L)
@@ -29,9 +26,6 @@ public:
                 output += QString::number(lua_tonumber(L, i));
             } else if (lua_isboolean(L, i)) {
                 output += lua_toboolean(L, i) ? "true" : "false";
-            } else if (lua_isvector(L, i)) {
-                auto v = lua_tovector(L, i);
-                output += QString("{%1, %2, %3}").arg(v[0]).arg(v[1]).arg(v[2]);
             } else if (lua_isnil(L, i)) {
                 output += "nil";
             } else {
@@ -43,6 +37,72 @@ public:
         return 0;
     }
 
+    QVariant parseTable(int index)
+    {
+        // 确保索引处是一个表
+        if (!lua_istable(L, index)) {
+            return QVariant();
+        }
+        // 规范化索引（如果是负数）
+        if (index < 0) {
+            index = lua_gettop(L) + index + 1;
+        }
+        // 检查表是否为数组形式（第一个元素没有键）
+        bool isArray = true;
+        // 将表复制到栈顶以便遍历
+        lua_pushvalue(L, index);
+        lua_pushnil(L); // 第一个键
+        if (lua_next(L, -2)) {
+            // 检查第一个键是否为数字1
+            isArray = lua_isnumber(L, -2) && (lua_tonumber(L, -2) == 1);
+            // 弹出值和键，保留表
+            lua_pop(L, 2);
+        } else {
+            // 空表，默认当作数组处理
+            lua_pop(L, 1); // 弹出nil
+        }
+        if (isArray) {
+            // 解析为QList<QVariant>
+            QList<QVariant> result;
+            // 遍历数组
+            lua_pushvalue(L, index); // 再次将表压入栈
+            int len = lua_rawlen(L, -1);
+            for (int i = 1; i <= len; i++) {
+                lua_rawgeti(L, -1, i);
+                result.append(toValue(-1)); // 使用您已实现的toValue函数
+                lua_pop(L, 1);
+            }
+            lua_pop(L, 1); // 弹出表
+            return QVariant::fromValue(result);
+        } else {
+            // 解析为QVariantMap
+            QVariantMap result;
+            // 遍历表
+            lua_pushvalue(L, index); // 再次将表压入栈
+            lua_pushnil(L);          // 第一个键
+            while (lua_next(L, -2)) {
+                // 键在-2，值在-1
+                QVariant key;
+                if (lua_isstring(L, -2)) {
+                    key = QString::fromUtf8(lua_tostring(L, -2));
+                } else if (lua_isnumber(L, -2)) {
+                    key = lua_tonumber(L, -2);
+                } else {
+                    // 其他类型的键，跳过
+                    qWarning() << "unsupported key type" << lua_typename(L, lua_type(L, -2));
+                    lua_pop(L, 1);
+                    continue;
+                }
+                QVariant value = toValue(-1);
+                result[key.toString()] = value;
+
+                lua_pop(L, 1); // 弹出值，保留键用于下一次迭代
+            }
+
+            lua_pop(L, 1); // 弹出表
+            return result;
+        }
+    }
     void pushValue(const QVariant &value)
     {
         switch (value.typeId()) {
@@ -62,8 +122,11 @@ public:
             lua_pushstring(L, str.toUtf8());
         } break;
         case QMetaType::QVector3D: {
-            auto vec = value.value<QVector3D>();
-            lua_pushvector(L, vec.x(), vec.y(), vec.z());
+            auto point = value.value<QVector3D>();
+            auto udata = (QVector3D **) lua_newuserdata(L, sizeof(QVector3D *));
+            *udata = new QVector3D(point);
+            luaL_getmetatable(L, QLUA_VECTOR3D_METATABLE_NAME);
+            lua_setmetatable(L, -2);
             break;
         }
         case QMetaType::QVariantList: {
@@ -79,7 +142,7 @@ public:
             auto point = value.toPointF();
             auto udata = (QPointF **) lua_newuserdata(L, sizeof(QPointF *));
             *udata = new QPointF(point);
-            luaL_getmetatable(L, QLPOINT_METATABLE_NAME);
+            luaL_getmetatable(L, QLUA_POINT_METATABLE_NAME);
             lua_setmetatable(L, -2);
             break;
         }
@@ -87,7 +150,7 @@ public:
             auto point = value.toPoint();
             auto udata = (QPointF **) lua_newuserdata(L, sizeof(QPointF *));
             *udata = new QPointF(point);
-            luaL_getmetatable(L, QLPOINT_METATABLE_NAME);
+            luaL_getmetatable(L, QLUA_POINT_METATABLE_NAME);
             lua_setmetatable(L, -2);
             break;
         }
@@ -116,100 +179,37 @@ public:
         case LUA_TBOOLEAN: {
             result = (bool) lua_toboolean(L, index);
         } break;
-        case LUA_TVECTOR: {
-            auto v = lua_tovector(L, index);
-            result = QVector3D(v[0], v[1], v[2]);
-        } break;
         case LUA_TNIL: {
             result = QVariant();
         } break;
         case LUA_TTABLE: {
-            if (index < 0) {
-                index = lua_gettop(L) + index + 1;
-            }
-
-            auto len = lua_objlen(L, index);
-
-            bool isList = true;
-            lua_pushnil(L); // 第一个 key
-            while (lua_next(L, index) != 0) {
-                // 检查 key 是否为数字
-                if (lua_type(L, -2) != LUA_TNUMBER) {
-                    isList = false;
-                    lua_pop(L, 2); // 弹出 key 和 value
-                    break;
-                }
-
-                // 获取数字 key
-                int key = lua_tointeger(L, -2);
-
-                // 检查 key 是否为正整数且不大于数组长度
-                if (key <= 0 || key > len || key != (int) lua_tonumber(L, -2)) {
-                    isList = false;
-                    lua_pop(L, 2); // 弹出 key 和 value
-                    break;
-                }
-
-                lua_pop(L, 1); // 只弹出 value，保留 key 用于下一次迭代
-            }
-
-            if (isList) {
-                QVariantList values;
-                for (int i = 1; i <= len; i++) {
-                    lua_rawgeti(L, index, i);
-                    values.push_back(toValue(-1));
-                    lua_pop(L, 1);
-                }
-                result = values;
-            } else {
-                // 处理字典情况
-                QVariantMap dict;
-
-                // 遍历表中的所有键值对
-                lua_pushnil(L); // 第一个 key
-                while (lua_next(L, index) != 0) {
-                    // 复制 key，避免 lua_tostring 可能修改原始值导致 lua_next 行为异常
-                    lua_pushvalue(L, -2);
-
-                    // 获取键（转换为字符串作为 QVariantMap 的键）
-                    QString key;
-                    switch (lua_type(L, -1)) {
-                    case LUA_TSTRING:
-                        key = QString::fromUtf8(lua_tostring(L, -1));
-                        break;
-                    case LUA_TNUMBER:
-                        key = QString::number(lua_tonumber(L, -1));
-                        break;
-                    case LUA_TBOOLEAN:
-                        key = lua_toboolean(L, -1) ? "true" : "false";
-                        break;
-                    default: {
-                        auto type = lua_typename(L, lua_type(L, -1));
-                        qWarning() << "unkonwn lua table key" << type;
-                        key = QString("<%s: %p>")
-                                  .arg(QString::fromUtf8(type), *(ptrdiff_t *) lua_topointer(L, -1));
-                    } break;
-                    }
-
-                    // 弹出复制的 key
-                    lua_pop(L, 1);
-
-                    // 获取值并添加到字典
-                    QVariant value = toValue(-1);
-                    dict[key] = value;
-
-                    // 弹出值，保留键用于下一次迭代
-                    lua_pop(L, 1);
-                }
-                result = dict;
-            }
+            result = parseTable(index);
         } break;
         case LUA_TUSERDATA: {
-            QPointF **udata = (QPointF **) luaL_checkudata(L, index, QLPOINT_METATABLE_NAME);
-            if (udata != nullptr) {
-                result = QVariant::fromValue(**udata);
-                break;
+            // 获取 userdata 的元表
+            if (lua_getmetatable(L, index)) { // 获取 userdata 的元表
+                // 从元表中获取 __name 字段
+                lua_getfield(L, -1, "__name");
+                if (lua_isstring(L, -1)) {
+                    auto typeName = QString::fromUtf8(lua_tostring(L, -1));
+                    lua_pop(L, 1); // 弹出 __name 值
+
+                    if (typeName == QLUA_POINT_METATABLE_NAME) {
+                        // 根据您的实际实现调整指针类型
+                        QPointF *pointData = *(QPointF **) lua_touserdata(L, index);
+                        // 或者如果是直接存储的对象：QPointF *pointData = (QPointF*) lua_touserdata(L, index);
+                        result = QVariant::fromValue(*pointData);
+                    } else if (typeName == QLUA_VECTOR3D_METATABLE_NAME) {
+                        QVector3D *vectorData = *(QVector3D **) lua_touserdata(L, index);
+                        // 或者：QVector3D *vectorData = (QVector3D*) lua_touserdata(L, index);
+                        result = QVariant::fromValue(*vectorData);
+                    }
+                } else {
+                    lua_pop(L, 1); // 弹出 nil 或非字符串值
+                }
+                lua_pop(L, 1); // 弹出元表
             }
+            break;
         }
         default: {
             qWarning() << "unknown lua type" << lua_typename(L, type);
@@ -221,59 +221,43 @@ public:
     lua_State *L;
 };
 
-QLuau::QLuau(QObject *parent)
+QLua::QLua(QObject *parent)
     : QObject{parent}
-    , d_ptr(new QLuauPrivate())
+    , d_ptr(new QLuaPrivate())
 {
-    Q_D(QLuau);
+    Q_D(QLua);
     d->L = luaL_newstate();
     luaL_openlibs(d->L);
     qlpoint_openlib(d->L);
-    lua_pushcfunction(d->L, QLuauPrivate::luaPrint, "print");
+    qlvector3d_openlib(d->L);
+    lua_pushcfunction(d->L, QLuaPrivate::luaPrint);
     lua_setglobal(d->L, "print");
 }
 
-QLuau::~QLuau()
+QLua::~QLua()
 {
-    Q_D(QLuau);
+    Q_D(QLua);
     lua_close(d->L);
 }
 
-void QLuau::load(const QString &code)
+void QLua::load(const QString &code)
 {
-    Q_D(QLuau);
+    Q_D(QLua);
 
     // 将QString转换为UTF-8编码
     QByteArray codeUtf8 = code.toUtf8();
 
-    // 编译代码
-    Luau::CompileOptions options;
-    std::string bytecode = Luau::compile(codeUtf8.constData(), options);
-
-    // 加载编译后的代码
-    int status = luau_load(d->L, "=code", bytecode.data(), bytecode.size(), 0);
-
-    if (status != 0) {
-        // 如果加载失败，获取错误信息
-        QString errorMessage = QString::fromUtf8(lua_tostring(d->L, -1));
-        qWarning() << "Failed to load Luau code:" << errorMessage;
-        lua_pop(d->L, 1); // 弹出错误信息
+    auto err = luaL_loadstring(d->L, codeUtf8.data());
+    if (err) {
+        qWarning() << "failed load code with err: " << err;
         return;
     }
-
-    // 执行加载的代码
-    status = lua_pcall(d->L, 0, 0, 0);
-    if (status != 0) {
-        // 如果执行失败，获取错误信息
-        QString errorMessage = QString::fromUtf8(lua_tostring(d->L, -1));
-        qWarning() << "Failed to execute Luau code:" << errorMessage;
-        lua_pop(d->L, 1); // 弹出错误信息
-    }
+    lua_pcall(d->L, 0, 0, 0);
 }
 
-QVariant QLuau::call(const QString &funcName, const QVariantList &args)
+QVariant QLua::call(const QString &funcName, const QVariantList &args)
 {
-    Q_D(QLuau);
+    Q_D(QLua);
 
     // 获取全局函数
     lua_getglobal(d->L, funcName.toUtf8().constData());
